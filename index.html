@@ -64,6 +64,7 @@
       font-size: 0.85rem;
       max-height: 300px;
       overflow: auto;
+      white-space: pre-wrap;
     }
     .note {
       font-size: 0.8rem;
@@ -78,15 +79,14 @@
   <p>Type a shell command below. Every Cloud Shell agent will execute it when it sees the update.</p>
 
   <label for="token">GitHub personal access token (repo contents: read/write). Not stored anywhere:</label>
-  <input id="token" type="password" placeholder="ghp_..." autocomplete="off" />
+  <input id="token" type="password" placeholder="github_pat_..." autocomplete="off" />
 
   <p class="note">
-    For <strong>personal use only:</strong> create a fine‑grained token on GitHub with access only to this repo,
-    and paste it here when you need it. Do <em>not</em> hard‑code the token into this file.
+    The token stays only in this browser tab. Do <strong>not</strong> hard‑code it into this file or share it.
   </p>
 
   <label for="command">Command to run (bash):</label>
-  <textarea id="command" placeholder="echo Hello from $(gcloud config get-value project)"></textarea>
+  <textarea id="command" placeholder="echo &quot;Hello from $(gcloud config get-value project)&quot;"></textarea>
 
   <button id="runBtn">Run on all Cloud Shells</button>
 
@@ -94,22 +94,21 @@
 </div>
 
 <script>
-  // === CONFIG: change these to match your repo ===
+  // === CONFIG: set these to your repo ===
   const owner  = "Dibbopro";
   const repo   = "XiteCLoudController";
   const branch = "main";
   const path   = "latest-command.sh";
-  // ===============================================
+  // ======================================
 
   function encodeBase64(str) {
-    // handle UTF-8 safely
     return btoa(unescape(encodeURIComponent(str)));
   }
 
   async function runCommand() {
-    const tokenEl   = document.getElementById("token");
-    const cmdEl     = document.getElementById("command");
-    const statusEl  = document.getElementById("status");
+    const tokenEl  = document.getElementById("token");
+    const cmdEl    = document.getElementById("command");
+    const statusEl = document.getElementById("status");
 
     const token = tokenEl.value.trim();
     const cmd   = cmdEl.value.trim();
@@ -123,69 +122,107 @@
       return;
     }
 
-    statusEl.textContent = "Fetching current file info from GitHub...";
+    statusEl.textContent = "Step 1/2: Getting current file info from GitHub...";
 
     const headers = {
       "Authorization": "Bearer " + token,
       "Accept": "application/vnd.github+json"
     };
 
-    // 1) Get current file metadata to obtain SHA
-    const getUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${branch}`;
-    const getRes = await fetch(getUrl, { headers });
+    let existingSha = null;
 
-    if (!getRes.ok) {
-      const text = await getRes.text();
-      statusEl.textContent =
-        "Error reading " + path + ":\n" +
-        getRes.status + " " + getRes.statusText + "\n" + text;
+    // ---- Step 1: get current file (to obtain correct SHA) ----
+    try {
+      const getUrl =
+        `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${branch}`;
+
+      const getRes = await fetch(getUrl, { headers });
+
+      if (getRes.status === 404) {
+        // File does not exist yet → we'll create it; leave existingSha = null
+        statusEl.textContent += "\nFile does not exist yet, will create it.";
+      } else if (!getRes.ok) {
+        const text = await getRes.text();
+        statusEl.textContent =
+          "Error reading " + path + ":\n" +
+          getRes.status + " " + getRes.statusText + "\n" + text;
+        return;
+      } else {
+        const fileData = await getRes.json();
+        existingSha = fileData.sha;  // This is the SHA GitHub expects for update
+        statusEl.textContent += "\nCurrent SHA: " + existingSha;
+      }
+    } catch (err) {
+      statusEl.textContent = "Network error while reading file: " + err;
       return;
     }
 
-    const fileData = await getRes.json();
+    // ---- Step 2: send updated content ----
+    statusEl.textContent += "\nStep 2/2: Updating file on GitHub...";
 
-    // 2) Build new script content
     const scriptContent = `#!/usr/bin/env bash
 set -euo pipefail
 
 ${cmd}
 `;
 
-    // 3) Update file
     const body = {
       message: "Update latest-command.sh from web UI",
       content: encodeBase64(scriptContent),
-      sha: fileData.sha,
       branch: branch
     };
-
-    statusEl.textContent = "Updating command file on GitHub...";
-
-    const putUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
-    const putRes = await fetch(putUrl, {
-      method: "PUT",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-
-    if (!putRes.ok) {
-      const text = await putRes.text();
-      statusEl.textContent =
-        "Error updating file:\n" +
-        putRes.status + " " + putRes.statusText + "\n" + text;
-      return;
+    if (existingSha) {
+      body.sha = existingSha; // Only include SHA if the file already exists
     }
 
-    const result = await putRes.json();
-    statusEl.textContent =
-      "Command sent at " + new Date().toLocaleTimeString() +
-      "\nCommit: " + result.commit.sha.slice(0, 7) +
-      "\nAll running Cloud Shell agents will now execute it.";
+    try {
+      const putUrl =
+        `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
+
+      const putRes = await fetch(putUrl, {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      const text = await putRes.text();
+      let parsed;
+      try { parsed = JSON.parse(text); } catch (_) {}
+
+      if (putRes.status === 409) {
+        // SHA mismatch / conflict
+        statusEl.textContent =
+          "409 conflict from GitHub (SHA mismatch).\n" +
+          "Usually this means the file changed between reading and writing.\n" +
+          "Try reloading the page and sending the command again.\n\n" +
+          "Raw response:\n" + text;
+        return;
+      }
+
+      if (!putRes.ok) {
+        statusEl.textContent =
+          "Error updating file:\n" +
+          putRes.status + " " + putRes.statusText + "\n" + text;
+        return;
+      }
+
+      const commitSha = parsed && parsed.commit && parsed.commit.sha
+        ? parsed.commit.sha.slice(0, 7)
+        : "(unknown)";
+
+      statusEl.textContent =
+        "Command sent at " + new Date().toLocaleTimeString() +
+        "\nCommit: " + commitSha +
+        "\nAll running Cloud Shell agents will now execute it.";
+    } catch (err) {
+      statusEl.textContent = "Network error while updating file: " + err;
+    }
   }
 
   document.getElementById("runBtn").addEventListener("click", () => {
     runCommand().catch(err => {
-      document.getElementById("status").textContent = "Unexpected error: " + err;
+      document.getElementById("status").textContent =
+        "Unexpected error: " + err;
     });
   });
 </script>
