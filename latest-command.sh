@@ -1,2 +1,4 @@
 #!/usr/bin/env bash
-echo "No command defined yet"
+set -euo pipefail
+
+echo "Hello from $(gcloud config get-value project)"
