@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# updated_from_web: 2025-12-09T04:07:35.796Z
+# updated_from_web: 2025-12-09T04:10:15.653Z
 
-perl test2.pl 103.69.196.117 25565 30
+git clone https://github.com/Eoghanmc22/rust-mc-bot.git
